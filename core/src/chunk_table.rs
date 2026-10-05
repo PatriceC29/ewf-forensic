@@ -106,7 +106,15 @@ pub(crate) fn parse_table_section(
             if last.size() == chunk_size {
                 let actual = end.saturating_sub(last.offset());
                 if last.compressed() {
-                    let max_size = chunk_size + (chunk_size >> 12) + (chunk_size >> 14) + 13;
+                    // Not deflate's documented worst case but twice the
+                    // chunk size. A writer at a low compression level can
+                    // expand incompressible data by several percent past
+                    // that bound (a 32 KiB chunk took 34.5 KiB in images a
+                    // real acquisition tool wrote), and such a chunk, cut
+                    // at the nominal bound, decoded short and read its tail
+                    // as zeros. A zlib stream ends by itself, so offering
+                    // the decoder more bytes than it needs is harmless.
+                    let max_size = chunk_size * 2;
                     if actual > 0 && actual <= max_size {
                         last.set_size(actual);
                     }
@@ -384,5 +392,37 @@ impl TableSectionRef {
             segment_idx: seg_idx,
             sectors_data_end,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    const CHUNK: u64 = 32768;
+
+    /// One compressed entry at offset 0 of a table based at 100.
+    fn one_compressed_chunk(sectors_end: u64) -> Chunk {
+        let entry = 0x8000_0000u32.to_le_bytes();
+        let chunks = parse_table_section(&entry, 1, 100, 0, CHUNK, Some(sectors_end)).unwrap();
+        chunks.into_iter().next().unwrap()
+    }
+
+    /// A compressed last chunk can be larger than the chunk it holds: deflate
+    /// at a low level expands high-entropy data by several percent, past the
+    /// documented worst case. Its size is the span to the section's end.
+    #[test]
+    fn a_compressed_last_chunk_may_exceed_the_deflate_worst_case() {
+        let c = one_compressed_chunk(100 + 34_511);
+        assert!(c.compressed());
+        assert_eq!(c.size(), 34_511);
+    }
+
+    /// Still bounded: a span far beyond any plausible chunk is not trusted.
+    #[test]
+    fn an_absurd_span_keeps_the_nominal_size() {
+        let c = one_compressed_chunk(100 + 3 * CHUNK);
+        assert_eq!(c.size(), CHUNK);
     }
 }
